@@ -6,7 +6,6 @@ A minimal Container Storage Interface (CSI) driver for Proxmox Virtual Environme
 
 - Dynamic volume provisioning
 - Volume expansion (online)
-- Snapshots and cloning
 - Raw block volumes
 - ext4 and xfs filesystem support
 - ReadWriteOnce (SINGLE_NODE_WRITER) access mode
@@ -16,7 +15,7 @@ A minimal Container Storage Interface (CSI) driver for Proxmox Virtual Environme
 
 The driver consists of two components:
 
-- **Controller**: Handles volume lifecycle operations (create, delete, attach, detach, expand, snapshot)
+- **Controller**: Handles volume lifecycle operations (create, delete, attach, detach, expand)
 - **Node**: Handles volume mounting and device operations on each Kubernetes node
 
 ## Requirements
@@ -24,7 +23,6 @@ The driver consists of two components:
 - Proxmox VE 7.0 or later
 - Kubernetes 1.20 or later
 - Shared LVM storage configured in Proxmox
-- CSI snapshotter CRDs installed (for snapshot support)
 
 ## Releases
 
@@ -98,15 +96,7 @@ Apply the secret:
 kubectl apply -f deploy/secret.yaml
 ```
 
-### 3. Install CSI Snapshot CRDs (Optional, for snapshot support)
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
-```
-
-### 4. Deploy the CSI Driver
+### 3. Deploy the CSI Driver
 
 ```bash
 # Deploy RBAC resources
@@ -122,7 +112,7 @@ kubectl apply -f deploy/node-daemonset.yaml
 kubectl apply -f deploy/storageclass.yaml
 ```
 
-### 5. Verify Installation
+### 4. Verify Installation
 
 ```bash
 # Check controller pod
@@ -182,39 +172,6 @@ kubectl patch pvc test-pvc -p '{"spec":{"resources":{"requests":{"storage":"20Gi
 ```
 
 The filesystem will be automatically expanded online.
-
-### Create a Snapshot
-
-```yaml
-apiVersion: snapshot.storage.k8s.io/v1
-kind: VolumeSnapshot
-metadata:
-  name: test-snapshot
-spec:
-  volumeSnapshotClassName: proxmox-snapshot
-  source:
-    persistentVolumeClaimName: test-pvc
-```
-
-### Restore from Snapshot
-
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: restored-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: proxmox-lvm-ext4
-  dataSource:
-    name: test-snapshot
-    kind: VolumeSnapshot
-    apiGroup: snapshot.storage.k8s.io
-  resources:
-    requests:
-      storage: 10Gi
-```
 
 ### Raw Block Volume
 
@@ -398,7 +355,8 @@ kubectl logs -n kube-system -l app=proxmox-csi-node -c proxmox-csi-node
 - ReadWriteOnce access mode only (no ReadWriteMany)
 - No encryption support (LUKS)
 - No topology awareness (single cluster)
-- Maximum 30 volumes per node (QEMU SCSI limitation)
+- Maximum 29 volumes per node (QEMU SCSI limitation, LUN 0 avoided)
+- No snapshot or clone support (Proxmox API limitation with LVM storage)
 
 ## License
 
