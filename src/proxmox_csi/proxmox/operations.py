@@ -1,0 +1,349 @@
+"""
+Proxmox volume operations with split-brain protection
+"""
+import logging
+from typing import Dict, Optional, Tuple
+from .client import ProxmoxClient
+from .wwn import calculate_wwn, find_free_lun, is_disk_attached
+from ..constants import STORAGE_VMID, DEVICE_PREFIX
+from ..volume.volume_id import parse_volume_id, create_volume_id
+
+
+logger = logging.getLogger(__name__)
+
+
+def create_volume(client: ProxmoxClient, region: str, zone: str,
+                 storage: str, pvc_name: str, size_bytes: int) -> str:
+    """
+    Create LVM volume on Proxmox
+
+    Args:
+        client: Proxmox API client
+        region: Cluster region
+        zone: Node name
+        storage: Storage ID
+        pvc_name: PVC name
+        size_bytes: Volume size in bytes
+
+    Returns:
+        Volume ID string
+    """
+    disk_name = f"vm-{STORAGE_VMID}-{pvc_name}"
+    size_gib = size_bytes / (1024 ** 3)
+
+    logger.info(f"Creating volume {disk_name} on {zone}/{storage}, size={size_bytes} bytes ({size_gib:.2f} GiB)")
+    logger.debug(f"create_volume params: region={region}, zone={zone}, storage={storage}, "
+                f"pvc_name={pvc_name}, STORAGE_VMID={STORAGE_VMID}, disk_name={disk_name}")
+
+    client.create_vm_disk(
+        vmid=STORAGE_VMID,
+        node=zone,
+        storage=storage,
+        filename=disk_name,
+        size_bytes=size_bytes
+    )
+
+    volume_id = create_volume_id(region, zone, storage, pvc_name, STORAGE_VMID)
+
+    logger.info(f"Volume created: {volume_id}")
+    return volume_id
+
+
+def delete_volume(client: ProxmoxClient, volume_id: str) -> bool:
+    """
+    Delete volume
+
+    Args:
+        client: Proxmox API client
+        volume_id: Volume ID
+
+    Returns:
+        True if successful
+    """
+    region, zone, storage, disk = parse_volume_id(volume_id)
+
+    logger.info(f"Deleting volume {volume_id}")
+
+    client.delete_vm_disk(
+        vmid=STORAGE_VMID,
+        node=zone,
+        storage=storage,
+        volume=disk
+    )
+
+    logger.info(f"Volume deleted: {volume_id}")
+    return True
+
+
+def attach_volume(client: ProxmoxClient, vmid: int, volume_id: str) -> Dict[str, str]:
+    """
+    Attach volume to VM with WWN identifier
+
+    Args:
+        client: Proxmox API client
+        vmid: VM ID to attach to
+        volume_id: Volume ID
+
+    Returns:
+        Publish context with DevicePath and lun
+
+    Raises:
+        Exception: If no free LUN or attachment fails
+    """
+    region, zone, storage, disk = parse_volume_id(volume_id)
+
+    logger.info(f"Attaching volume {volume_id} to VM {vmid}")
+
+    # Find which node the VM is currently on
+    vm_node = client.find_vm_node(vmid)
+    if vm_node is None:
+        raise Exception(f"VM {vmid} not found on any node")
+
+    logger.debug(f"VM {vmid} is on node {vm_node}")
+
+    # Get VM config
+    vm_config = client.get_vm_config(vmid, vm_node)
+    scsi_disks = client.extract_scsi_disks(vm_config)
+
+    # Check if already attached
+    existing_lun = is_disk_attached(scsi_disks, disk)
+    if existing_lun is not None:
+        logger.info(f"Volume {volume_id} already attached to VM {vmid} at LUN {existing_lun}")
+        wwn = calculate_wwn(existing_lun)
+        return {
+            'DevicePath': f'/dev/disk/by-id/wwn-0x{wwn}',
+            'lun': str(existing_lun)
+        }
+
+    # Find free LUN
+    lun = find_free_lun(scsi_disks)
+    if lun is None:
+        raise Exception(f"No free LUN available for VM {vmid}")
+
+    # Calculate WWN
+    wwn = calculate_wwn(lun)
+
+    # Attach disk
+    device = f"{DEVICE_PREFIX}{lun}"
+    disk_string = f"{storage}:{disk},wwn=0x{wwn},backup=0"
+
+    logger.info(f"Attaching {disk} to VM {vmid} on node {vm_node} as {device} with WWN 0x{wwn}")
+
+    client.update_vm_config(vmid, vm_node, {device: disk_string})
+
+    return {
+        'DevicePath': f'/dev/disk/by-id/wwn-0x{wwn}',
+        'lun': str(lun)
+    }
+
+
+def detach_volume(client: ProxmoxClient, vmid: int, volume_id: str) -> bool:
+    """
+    Detach volume from VM
+
+    Args:
+        client: Proxmox API client
+        vmid: VM ID
+        volume_id: Volume ID
+
+    Returns:
+        True if successful
+    """
+    region, zone, storage, disk = parse_volume_id(volume_id)
+
+    logger.info(f"Detaching volume {volume_id} from VM {vmid}")
+
+    # Find which node the VM is currently on (it might have migrated)
+    vm_node = client.find_vm_node(vmid)
+    if vm_node is None:
+        logger.warning(f"VM {vmid} not found on any node, assuming already deleted")
+        return True
+
+    logger.debug(f"VM {vmid} is on node {vm_node}")
+
+    # Get VM config
+    vm_config = client.get_vm_config(vmid, vm_node)
+    scsi_disks = client.extract_scsi_disks(vm_config)
+
+    # Find disk
+    lun = is_disk_attached(scsi_disks, disk)
+    if lun is None:
+        logger.warning(f"Volume {volume_id} not attached to VM {vmid}, already detached")
+        return True
+
+    # Detach disk
+    device = f"{DEVICE_PREFIX}{lun}"
+
+    logger.info(f"Detaching device {device} from VM {vmid} on node {vm_node}")
+
+    # Proxmox API expects 'delete' parameter with device name
+    client.update_vm_config(vmid, vm_node, {
+        'delete': device
+    })
+
+    logger.info(f"Volume {volume_id} detached from VM {vmid}")
+    return True
+
+
+def check_existing_attachments(client: ProxmoxClient, region: str,
+                               storage: str, disk_name: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    CRITICAL: Split-brain protection
+
+    Scan all VMs across all nodes to find existing attachments of a disk.
+    This prevents double-attachment which could cause data corruption.
+
+    Args:
+        client: Proxmox API client
+        region: Cluster region
+        storage: Storage ID
+        disk_name: Disk name to search for
+
+    Returns:
+        Tuple of (vmid, lun) if found, (None, None) otherwise
+    """
+    logger.info(f"Checking for existing attachments of {disk_name}")
+
+    nodes = client.get_nodes()
+
+    for node in nodes:
+        try:
+            vms = client.get_vms(node)
+
+            for vm in vms:
+                vmid = vm['vmid']
+
+                # Skip storage VM
+                if vmid == STORAGE_VMID:
+                    continue
+
+                try:
+                    vm_config = client.get_vm_config(vmid, node)
+                    scsi_disks = client.extract_scsi_disks(vm_config)
+
+                    lun = is_disk_attached(scsi_disks, disk_name)
+                    if lun is not None:
+                        logger.warning(f"Volume {disk_name} is already attached to VM {vmid} (LUN {lun}) on node {node}")
+                        return vmid, lun
+
+                except Exception as e:
+                    logger.error(f"Failed to check VM {vmid} on {node}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Failed to get VMs from node {node}: {e}")
+            continue
+
+    logger.info(f"No existing attachments found for {disk_name}")
+    return None, None
+
+
+def create_snapshot(client: ProxmoxClient, source_volume_id: str,
+                   snapshot_name: str) -> str:
+    """
+    Create snapshot via Proxmox copy operation
+
+    Args:
+        client: Proxmox API client
+        source_volume_id: Source volume ID
+        snapshot_name: Snapshot name
+
+    Returns:
+        Snapshot volume ID
+    """
+    region, zone, storage, source_disk = parse_volume_id(source_volume_id)
+
+    snapshot_disk = f"vm-{STORAGE_VMID}-{snapshot_name}"
+
+    logger.info(f"Creating snapshot {snapshot_disk} from {source_disk}")
+
+    client.copy_volume(
+        node=zone,
+        storage=storage,
+        volume=source_disk,
+        target_name=snapshot_disk
+    )
+
+    snapshot_id = create_volume_id(region, zone, storage, snapshot_name, STORAGE_VMID)
+
+    logger.info(f"Snapshot created: {snapshot_id}")
+    return snapshot_id
+
+
+def clone_volume(client: ProxmoxClient, source_volume_id: str,
+                target_pvc_name: str) -> str:
+    """
+    Clone volume from snapshot or volume
+
+    Args:
+        client: Proxmox API client
+        source_volume_id: Source volume ID
+        target_pvc_name: Target PVC name
+
+    Returns:
+        Target volume ID
+    """
+    src_region, src_zone, src_storage, src_disk = parse_volume_id(source_volume_id)
+
+    target_disk = f"vm-{STORAGE_VMID}-{target_pvc_name}"
+
+    logger.info(f"Cloning {src_disk} to {target_disk}")
+
+    client.copy_volume(
+        node=src_zone,
+        storage=src_storage,
+        volume=src_disk,
+        target_name=target_disk
+    )
+
+    target_id = create_volume_id(src_region, src_zone, src_storage, target_pvc_name, STORAGE_VMID)
+
+    logger.info(f"Volume cloned: {target_id}")
+    return target_id
+
+
+def expand_volume(client: ProxmoxClient, vmid: int, volume_id: str,
+                 new_size_bytes: int) -> bool:
+    """
+    Expand volume at storage level
+
+    Args:
+        client: Proxmox API client
+        vmid: VM ID (volume must be attached)
+        volume_id: Volume ID
+        new_size_bytes: New size in bytes
+
+    Returns:
+        True if successful
+
+    Raises:
+        Exception: If volume not attached or resize fails
+    """
+    region, zone, storage, disk = parse_volume_id(volume_id)
+
+    logger.info(f"Expanding volume {volume_id} to {new_size_bytes} bytes")
+
+    # Find which node the VM is currently on
+    vm_node = client.find_vm_node(vmid)
+    if vm_node is None:
+        raise Exception(f"VM {vmid} not found on any node")
+
+    logger.debug(f"VM {vmid} is on node {vm_node}")
+
+    # Get VM config to find LUN
+    vm_config = client.get_vm_config(vmid, vm_node)
+    scsi_disks = client.extract_scsi_disks(vm_config)
+
+    lun = is_disk_attached(scsi_disks, disk)
+    if lun is None:
+        raise Exception(f"Volume {volume_id} not attached to VM {vmid}, cannot resize")
+
+    device = f"{DEVICE_PREFIX}{lun}"
+    size_mb = new_size_bytes // (1024 * 1024)
+
+    logger.info(f"Resizing device {device} to {size_mb}M on node {vm_node}")
+
+    client.resize_vm_disk(vmid, vm_node, device, f"{size_mb}M")
+
+    logger.info(f"Volume {volume_id} expanded successfully")
+    return True

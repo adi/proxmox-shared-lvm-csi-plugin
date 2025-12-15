@@ -1,0 +1,100 @@
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: proxmox-csi-controller
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: proxmox-csi-controller
+  template:
+    metadata:
+      labels:
+        app: proxmox-csi-controller
+    spec:
+      serviceAccountName: proxmox-csi-controller
+      containers:
+        # CSI Provisioner
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=5"
+            - "--timeout=300s"
+            - "--leader-election=true"
+            - "--worker-threads=10"
+            - "--extra-create-metadata"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        # CSI Attacher
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.7.0
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=5"
+            - "--timeout=300s"
+            - "--leader-election=true"
+            - "--worker-threads=10"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        # CSI Resizer
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.12.0
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=5"
+            - "--timeout=300s"
+            - "--handle-volume-inuse-error=false"
+            - "--leader-election=true"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        # Proxmox CSI Controller
+        - name: proxmox-csi-controller
+          image: ghcr.io/adi/proxmox-shared-lvm-csi-controller:VERSION_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--v=5"
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: LOG_LEVEL
+              value: INFO
+            - name: CLOUD_CONFIG
+              value: /etc/proxmox/config.yaml
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: cloud-config
+              mountPath: /etc/proxmox
+              readOnly: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: cloud-config
+          secret:
+            secretName: proxmox-csi-config

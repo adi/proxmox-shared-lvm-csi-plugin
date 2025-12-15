@@ -1,0 +1,33 @@
+FROM python:3.11-slim
+
+LABEL maintainer="Proxmox CSI Plugin"
+LABEL description="Proxmox CSI Node"
+
+WORKDIR /app
+
+# Install system dependencies for filesystem operations
+RUN apt-get update && apt-get install -y \
+    e2fsprogs \
+    xfsprogs \
+    util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN uv pip install --system --no-cache -r requirements.txt
+
+# Copy source code
+COPY src/proxmox_csi /app/proxmox_csi
+
+# Create CSI socket directory
+RUN mkdir -p /csi
+
+# Default endpoint
+ENV CSI_ENDPOINT=unix:///csi/csi.sock
+ENV LOG_LEVEL=INFO
+
+# Node runs as root for device and mount operations
+ENTRYPOINT ["python", "-m", "proxmox_csi.main_node"]

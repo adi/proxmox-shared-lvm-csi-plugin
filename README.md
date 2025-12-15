@@ -1,0 +1,414 @@
+# Proxmox CSI Plugin (Python Implementation)
+
+A minimal Container Storage Interface (CSI) driver for Proxmox Virtual Environment, specifically designed for Shared LVM storage with ext4/xfs filesystems.
+
+## Features
+
+- Dynamic volume provisioning
+- Volume expansion (online)
+- Snapshots and cloning
+- Raw block volumes
+- ext4 and xfs filesystem support
+- ReadWriteOnce (SINGLE_NODE_WRITER) access mode
+- Split-brain protection for shared storage
+
+## Architecture
+
+The driver consists of two components:
+
+- **Controller**: Handles volume lifecycle operations (create, delete, attach, detach, expand, snapshot)
+- **Node**: Handles volume mounting and device operations on each Kubernetes node
+
+## Requirements
+
+- Proxmox VE 7.0 or later
+- Kubernetes 1.20 or later
+- Shared LVM storage configured in Proxmox
+- CSI snapshotter CRDs installed (for snapshot support)
+
+## Releases
+
+Releases are versioned using timestamps in the format `YYYY-MM-DD-HH-MM-SS` (UTC). Each release includes:
+
+- Tagged source code
+- Multi-arch Docker images (amd64, arm64) published to GHCR
+- Kubernetes manifests with pinned image versions
+- Combined `install.yaml` for easy deployment
+
+**Latest Release:** Check [GitHub Releases](https://github.com/adi/proxmox-shared-lvm-csi-plugin/releases)
+
+**Image Versioning:** Images are tagged with timestamp versions (e.g., `2025-12-15-15-28-34`). The `latest` tag is never used to maintain version control.
+
+## Installation
+
+### Quick Install
+
+```bash
+# Replace VERSION with the desired release version
+VERSION=2025-12-15-15-28-34
+
+# Create secret with Proxmox credentials
+kubectl create secret generic proxmox-csi-config \
+  --from-literal=config.yaml="$(cat <<EOL
+clusters:
+  - url: "https://your-proxmox-host:8006/api2/json"
+    token_id: "csi@pve!csi-token"
+    token_secret: "your-token-secret"
+    region: "cluster-1"
+    insecure: false
+EOL
+)" \
+  --namespace kube-system
+
+# Install CSI driver
+kubectl apply -f https://github.com/adi/proxmox-shared-lvm-csi-plugin/releases/download/${VERSION}/install.yaml
+```
+
+### 1. Create Proxmox API Token
+
+Create an API token in Proxmox with the following permissions:
+
+```bash
+# In Proxmox, create a user and token:
+# Datacenter > Permissions > API Tokens > Add
+
+# Required permissions:
+# - Datastore.Allocate
+# - Datastore.AllocateSpace
+# - VM.Config.Disk
+# - VM.Audit
+```
+
+### 2. Create Configuration Secret
+
+Edit `deploy/secret.yaml` with your Proxmox credentials:
+
+```yaml
+clusters:
+  - url: "https://your-proxmox-host:8006/api2/json"
+    token_id: "csi@pve!csi-token"
+    token_secret: "your-token-secret"
+    region: "cluster-1"
+    insecure: false  # Set to true to skip TLS verification
+```
+
+Apply the secret:
+
+```bash
+kubectl apply -f deploy/secret.yaml
+```
+
+### 3. Install CSI Snapshot CRDs (Optional, for snapshot support)
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+```
+
+### 4. Deploy the CSI Driver
+
+```bash
+# Deploy RBAC resources
+kubectl apply -f deploy/rbac.yaml
+
+# Deploy controller
+kubectl apply -f deploy/controller.yaml
+
+# Deploy node daemonset
+kubectl apply -f deploy/node-daemonset.yaml
+
+# Create storage classes
+kubectl apply -f deploy/storageclass.yaml
+```
+
+### 5. Verify Installation
+
+```bash
+# Check controller pod
+kubectl get pods -n kube-system -l app=proxmox-csi-controller
+
+# Check node pods
+kubectl get pods -n kube-system -l app=proxmox-csi-node
+
+# Check storage classes
+kubectl get storageclass
+```
+
+## Usage
+
+### Create a PersistentVolumeClaim
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: proxmox-lvm-ext4
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+### Use in a Pod
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+spec:
+  containers:
+    - name: app
+      image: nginx
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: test-pvc
+```
+
+### Expand a Volume
+
+Edit the PVC to increase the size:
+
+```bash
+kubectl patch pvc test-pvc -p '{"spec":{"resources":{"requests":{"storage":"20Gi"}}}}'
+```
+
+The filesystem will be automatically expanded online.
+
+### Create a Snapshot
+
+```yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: test-snapshot
+spec:
+  volumeSnapshotClassName: proxmox-snapshot
+  source:
+    persistentVolumeClaimName: test-pvc
+```
+
+### Restore from Snapshot
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: restored-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: proxmox-lvm-ext4
+  dataSource:
+    name: test-snapshot
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+### Raw Block Volume
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: block-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: proxmox-lvm-block
+  volumeMode: Block
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: block-pod
+spec:
+  containers:
+    - name: app
+      image: busybox
+      command: ["sleep", "infinity"]
+      volumeDevices:
+        - name: data
+          devicePath: /dev/xvda
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: block-pvc
+```
+
+## Configuration
+
+### StorageClass Parameters
+
+- `storage`: Proxmox shared LVM storage name (required)
+- `cache`: Cache mode for volumes (optional, default: directsync)
+  - `none`: No cache
+  - `writethrough`: Write-through cache
+  - `writeback`: Write-back cache
+  - `directsync`: Direct sync (recommended for shared storage)
+- `csi.storage.k8s.io/fstype`: Filesystem type (optional, default: ext4)
+  - `ext4`: ext4 filesystem
+  - `xfs`: xfs filesystem
+
+### Environment Variables
+
+**Controller:**
+- `CSI_ENDPOINT`: gRPC endpoint (default: unix:///csi/csi.sock)
+- `CLOUD_CONFIG`: Path to Proxmox config file (default: /etc/proxmox/config.yaml)
+- `LOG_LEVEL`: Logging level (default: INFO)
+
+**Node:**
+- `CSI_ENDPOINT`: gRPC endpoint (default: unix:///csi/csi.sock)
+- `NODE_NAME`: Kubernetes node name (required)
+- `LOG_LEVEL`: Logging level (default: INFO)
+
+## Release Process (for Maintainers)
+
+Releases are created manually via GitHub Actions:
+
+1. Navigate to **Actions** → **Release** workflow
+2. Click **Run workflow**
+3. Optionally add a release description
+4. Click **Run workflow** button
+
+The workflow will automatically:
+- Generate a timestamp-based version tag (e.g., `2025-12-15-15-28-34`)
+- Tag the source code and push to GitHub
+- Build multi-arch Docker images (amd64, arm64)
+- Push images to GHCR with the version tag
+- Generate versioned Kubernetes manifests
+- Create a GitHub release with all artifacts
+- Make manifests available via release URL for direct `kubectl apply`
+
+**Version Format:** `YYYY-MM-DD-HH-MM-SS` (UTC timezone)
+
+**No `latest` tag:** Images are never tagged with `latest` to maintain strict version control.
+
+## Development
+
+### Build Docker Images
+
+```bash
+# Build controller image
+docker build -f Dockerfile.controller -t proxmox-csi-controller:dev .
+
+# Build node image
+docker build -f Dockerfile.node -t proxmox-csi-node:dev .
+```
+
+### Run Tests
+
+```bash
+# Create virtual environment and install dependencies
+uv venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+
+# Run tests (TODO: add tests)
+pytest tests/
+```
+
+### Project Structure
+
+```
+proxmox-shared-lvm-csi-plugin/
+├── src/proxmox_csi/
+│   ├── main_controller.py       # Controller entrypoint
+│   ├── main_node.py             # Node entrypoint
+│   ├── grpc_server.py           # gRPC server setup
+│   ├── services/
+│   │   ├── identity.py          # CSI Identity service
+│   │   ├── controller.py        # CSI Controller service
+│   │   └── node.py              # CSI Node service
+│   ├── proxmox/
+│   │   ├── client.py            # Proxmox REST API client
+│   │   ├── operations.py        # Volume operations
+│   │   └── wwn.py               # WWN/LUN management
+│   ├── filesystem/
+│   │   ├── format.py            # Filesystem formatting
+│   │   ├── mount.py             # Mount operations
+│   │   └── resize.py            # Filesystem resize
+│   ├── device/
+│   │   └── discovery.py         # Device discovery
+│   ├── volume/
+│   │   └── volume_id.py         # Volume ID handling
+│   ├── config.py                # Configuration loading
+│   ├── constants.py             # Constants
+│   └── utils.py                 # Utilities
+├── deploy/
+│   ├── rbac.yaml                # RBAC resources
+│   ├── controller.yaml          # Controller deployment
+│   ├── node-daemonset.yaml      # Node DaemonSet
+│   ├── storageclass.yaml        # StorageClass examples
+│   └── secret.yaml              # Config secret template
+├── requirements.txt             # Python dependencies
+├── Dockerfile.controller        # Controller image
+├── Dockerfile.node              # Node image
+└── README.md                    # This file
+```
+
+## Troubleshooting
+
+### Check Controller Logs
+
+```bash
+kubectl logs -n kube-system -l app=proxmox-csi-controller -c proxmox-csi-controller
+```
+
+### Check Node Logs
+
+```bash
+kubectl logs -n kube-system -l app=proxmox-csi-node -c proxmox-csi-node
+```
+
+### Common Issues
+
+**Volume attachment fails:**
+- Check that the Proxmox API credentials are correct
+- Verify that the storage name in StorageClass matches Proxmox
+- Check split-brain protection logs (volume may be attached elsewhere)
+
+**Device not found:**
+- Wait a few seconds for device discovery (up to 10 seconds)
+- Check that SCSI device appears: `ls /sys/bus/scsi/devices/`
+- Verify WWN in device attributes: `cat /sys/bus/scsi/devices/*/wwid`
+
+**Mount fails:**
+- Check filesystem format: `blkid /dev/sdX`
+- Verify mount permissions
+- Check node logs for detailed error messages
+
+## Limitations
+
+- Only supports Shared LVM storage (lvm, lvmthin)
+- ReadWriteOnce access mode only (no ReadWriteMany)
+- No encryption support (LUKS)
+- No topology awareness (single cluster)
+- Maximum 30 volumes per node (QEMU SCSI limitation)
+
+## License
+
+Apache 2.0
+
+## Contributing
+
+Contributions are welcome! Please open an issue or pull request.
+
+## Credits
+
+This Python implementation is based on the original Go implementation at:
+https://github.com/adi/proxmox-shared-lvm-csi-plugin

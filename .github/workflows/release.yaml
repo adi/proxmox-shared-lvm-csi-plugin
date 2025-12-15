@@ -1,0 +1,296 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      description:
+        description: 'Release description'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate version tag
+        id: version
+        run: |
+          VERSION=$(date -u +%Y-%m-%d-%H-%M-%S)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Generated version: ${VERSION}"
+
+      - name: Create and push git tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push controller image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.controller
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/proxmox-shared-lvm-csi-controller:${{ steps.version.outputs.version }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push node image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.node
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/proxmox-shared-lvm-csi-node:${{ steps.version.outputs.version }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate release manifests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+        run: |
+          mkdir -p release-manifests
+
+          # Process each YAML template
+          for template in deploy/*.yaml; do
+            filename=$(basename "$template")
+
+            # Replace VERSION_PLACEHOLDER with actual version
+            sed -e "s|VERSION_PLACEHOLDER|${VERSION}|g" \
+                -e "s|ghcr.io/adi/|${REGISTRY}/|g" \
+                "$template" > "release-manifests/${filename}"
+          done
+
+          # Create a combined install manifest
+          cat release-manifests/csidriver.yaml \
+              release-manifests/rbac.yaml \
+              release-manifests/controller.yaml \
+              release-manifests/node-daemonset.yaml \
+              release-manifests/storageclass.yaml \
+              > release-manifests/install.yaml
+
+          echo "---" >> release-manifests/install.yaml
+          echo "# Note: Create secret.yaml with your Proxmox credentials before applying" >> release-manifests/install.yaml
+
+          # Create installation instructions
+          cat > release-manifests/INSTALL.md << 'EOF'
+          # Proxmox CSI Plugin Installation
+
+          ## Prerequisites
+
+          - Kubernetes 1.20 or later
+          - Proxmox VE 7.0 or later with Shared LVM storage
+          - CSI snapshot CRDs (optional, for snapshot support)
+
+          ## Installation Steps
+
+          ### 1. Create Proxmox API Token
+
+          In Proxmox web interface:
+          - Navigate to Datacenter > Permissions > API Tokens
+          - Create token with permissions: Datastore.Allocate, Datastore.AllocateSpace, VM.Config.Disk, VM.Audit
+
+          ### 2. Create Configuration Secret
+
+          Download and edit the secret template:
+
+          ```bash
+          kubectl create secret generic proxmox-csi-config \
+            --from-literal=config.yaml="$(cat <<EOL
+          clusters:
+            - url: "https://your-proxmox-host:8006/api2/json"
+              token_id: "csi@pve!csi-token"
+              token_secret: "your-token-secret"
+              region: "cluster-1"
+              insecure: false
+          EOL
+          )" \
+            --namespace kube-system
+          ```
+
+          Or download and edit secret.yaml:
+
+          ```bash
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${VERSION}/secret.yaml
+          # Edit secret.yaml with your credentials
+          kubectl apply -f secret.yaml
+          ```
+
+          ### 3. Install CSI Driver
+
+          ```bash
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/install.yaml
+          ```
+
+          Or install components individually:
+
+          ```bash
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/csidriver.yaml
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/rbac.yaml
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/controller.yaml
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/node-daemonset.yaml
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/storageclass.yaml
+          ```
+
+          ### 4. Verify Installation
+
+          ```bash
+          # Check controller
+          kubectl get pods -n kube-system -l app=proxmox-csi-controller
+
+          # Check node pods
+          kubectl get pods -n kube-system -l app=proxmox-csi-node
+
+          # Check storage classes
+          kubectl get storageclass
+          ```
+
+          ## Usage
+
+          ### Create a PersistentVolumeClaim
+
+          ```yaml
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: test-pvc
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            storageClassName: proxmox-lvm-ext4
+            resources:
+              requests:
+                storage: 10Gi
+          ```
+
+          ### Use in a Pod
+
+          ```yaml
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: test-pod
+          spec:
+            containers:
+              - name: app
+                image: nginx
+                volumeMounts:
+                  - name: data
+                    mountPath: /data
+            volumes:
+              - name: data
+                persistentVolumeClaim:
+                  claimName: test-pvc
+          ```
+
+          ## Uninstallation
+
+          ```bash
+          kubectl delete -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/install.yaml
+          kubectl delete secret proxmox-csi-config -n kube-system
+          ```
+
+          ## Documentation
+
+          For full documentation, see: https://github.com/${{ github.repository }}
+          EOF
+
+          # Replace version in INSTALL.md
+          sed -i "s|\${VERSION}|${VERSION}|g" release-manifests/INSTALL.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Release ${{ steps.version.outputs.version }}
+          body: |
+            # Proxmox CSI Plugin ${{ steps.version.outputs.version }}
+
+            ${{ github.event.inputs.description }}
+
+            ## Installation
+
+            ```bash
+            # Create secret with Proxmox credentials
+            kubectl create secret generic proxmox-csi-config \
+              --from-literal=config.yaml="$(cat <<EOL
+            clusters:
+              - url: "https://your-proxmox-host:8006/api2/json"
+                token_id: "csi@pve!csi-token"
+                token_secret: "your-token-secret"
+                region: "cluster-1"
+                insecure: false
+            EOL
+            )" \
+              --namespace kube-system
+
+            # Install CSI driver
+            kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/install.yaml
+            ```
+
+            ## Docker Images
+
+            - Controller: `ghcr.io/${{ github.repository_owner }}/proxmox-shared-lvm-csi-controller:${{ steps.version.outputs.version }}`
+            - Node: `ghcr.io/${{ github.repository_owner }}/proxmox-shared-lvm-csi-node:${{ steps.version.outputs.version }}`
+
+            ## Manifest Files
+
+            - [install.yaml](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/install.yaml) - Complete installation (all-in-one)
+            - [INSTALL.md](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/INSTALL.md) - Installation instructions
+            - Individual manifests: csidriver.yaml, rbac.yaml, controller.yaml, node-daemonset.yaml, storageclass.yaml, secret.yaml
+
+            ## Features
+
+            - Dynamic volume provisioning
+            - Volume expansion (online)
+            - Snapshots and cloning
+            - Raw block volumes
+            - ext4 and xfs filesystem support
+            - Split-brain protection for shared storage
+          draft: false
+          prerelease: false
+          files: |
+            release-manifests/*.yaml
+            release-manifests/INSTALL.md
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Images:**" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${{ github.repository_owner }}/proxmox-shared-lvm-csi-controller:${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${{ github.repository_owner }}/proxmox-shared-lvm-csi-node:${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Installation:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/install.yaml" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

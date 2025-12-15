@@ -1,0 +1,21 @@
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.proxmox.sqreept.com
+spec:
+  # This driver supports persistent volumes
+  attachRequired: true
+
+  # This driver supports volume ownership and permission changes
+  podInfoOnMount: false
+
+  # Volume lifecycle modes
+  volumeLifecycleModes:
+    - Persistent
+
+  # This driver does not support ephemeral volumes
+  # (only persistent volumes are supported)
+
+  # FSGroup policy
+  fsGroupPolicy: File

@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+LABEL maintainer="Proxmox CSI Plugin"
+LABEL description="Proxmox CSI Controller"
+
+WORKDIR /app
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Install dependencies
+COPY requirements.txt .
+RUN uv pip install --system --no-cache -r requirements.txt
+
+# Copy source code
+COPY src/proxmox_csi /app/proxmox_csi
+
+# Create CSI socket directory
+RUN mkdir -p /csi
+
+# Run as non-root user
+RUN useradd -u 1000 -m csi-user && \
+    chown -R csi-user:csi-user /app /csi
+
+USER csi-user
+
+# Default endpoint
+ENV CSI_ENDPOINT=unix:///csi/csi.sock
+ENV LOG_LEVEL=INFO
+
+ENTRYPOINT ["python", "-m", "proxmox_csi.main_controller"]

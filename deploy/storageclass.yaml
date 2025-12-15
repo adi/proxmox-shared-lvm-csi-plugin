@@ -1,0 +1,52 @@
+---
+# StorageClass for ext4 filesystem
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: proxmox-lvm-ext4
+provisioner: csi.proxmox.sqreept.com
+parameters:
+  storage: "alletra-vg"  # Your Proxmox shared LVM storage name
+  cache: "directsync"     # Cache mode: none, writethrough, writeback, directsync
+  csi.storage.k8s.io/fstype: "ext4"
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+
+---
+# StorageClass for xfs filesystem
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: proxmox-lvm-xfs
+provisioner: csi.proxmox.sqreept.com
+parameters:
+  storage: "alletra-vg"  # Your Proxmox shared LVM storage name
+  cache: "directsync"     # Cache mode: none, writethrough, writeback, directsync
+  csi.storage.k8s.io/fstype: "xfs"
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+
+---
+# StorageClass for raw block volumes
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: proxmox-lvm-block
+provisioner: csi.proxmox.sqreept.com
+parameters:
+  storage: "alletra-vg"  # Your Proxmox shared LVM storage name
+  cache: "directsync"     # Cache mode: none, writethrough, writeback, directsync
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+
+---
+# VolumeSnapshotClass for snapshots
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: proxmox-snapshot
+driver: csi.proxmox.sqreept.com
+deletionPolicy: Delete
