@@ -41,12 +41,3 @@ parameters:
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
 reclaimPolicy: Delete
-
----
-# VolumeSnapshotClass for snapshots
-apiVersion: snapshot.storage.k8s.io/v1
-kind: VolumeSnapshotClass
-metadata:
-  name: proxmox-snapshot
-driver: csi.proxmox.sqreept.com
-deletionPolicy: Delete

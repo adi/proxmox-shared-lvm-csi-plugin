@@ -10,12 +10,8 @@ from ..csi_pb2 import (
     ControllerPublishVolumeResponse,
     ControllerUnpublishVolumeResponse,
     ControllerExpandVolumeResponse,
-    CreateSnapshotResponse,
-    DeleteSnapshotResponse,
     ControllerGetCapabilitiesResponse,
     Volume,
-    Snapshot,
-    Topology,
     ControllerServiceCapability
 )
 from ..csi_pb2_grpc import ControllerServicer
@@ -26,8 +22,6 @@ from ..proxmox.operations import (
     attach_volume,
     detach_volume,
     check_existing_attachments,
-    create_snapshot,
-    clone_volume,
     expand_volume
 )
 from ..volume.volume_id import parse_volume_id
@@ -37,7 +31,6 @@ from ..constants import (
     MIN_VOLUME_SIZE,
     DEFAULT_VOLUME_SIZE
 )
-from google.protobuf.timestamp_pb2 import Timestamp
 
 
 logger = logging.getLogger(__name__)
@@ -95,27 +88,9 @@ class ControllerService(ControllerServicer):
             context.abort(grpc.StatusCode.INTERNAL, "No nodes available")
         zone = nodes[0]
 
-        # Handle snapshot/clone source
-        content_source = request.volume_content_source
-        has_content_source = content_source and (
-            content_source.HasField('snapshot') or content_source.HasField('volume')
-        )
-        logger.debug(f"CreateVolume: content_source present={bool(content_source)}, has_valid_source={has_content_source}")
-
-        if has_content_source:
-            logger.debug(f"CreateVolume: cloning from content source")
-            if content_source.HasField('snapshot'):
-                source_id = content_source.snapshot.snapshot_id
-                logger.info(f"CreateVolume: cloning from snapshot {source_id}")
-                volume_id = clone_volume(client, source_id, name)
-            elif content_source.HasField('volume'):
-                source_id = content_source.volume.volume_id
-                logger.info(f"CreateVolume: cloning from volume {source_id}")
-                volume_id = clone_volume(client, source_id, name)
-        else:
-            # Create new volume
-            logger.info(f"CreateVolume: creating new volume on storage={storage}, size={size_bytes}")
-            volume_id = create_volume(client, region, zone, storage, name, size_bytes)
+        # Create new volume
+        logger.info(f"CreateVolume: creating new volume on storage={storage}, size={size_bytes}")
+        volume_id = create_volume(client, region, zone, storage, name, size_bytes)
 
         # Return volume
         volume = Volume(
@@ -304,61 +279,6 @@ class ControllerService(ControllerServicer):
 
         except Exception as e:
             logger.error(f"ControllerExpandVolume failed: {e}")
-            context.abort(grpc.StatusCode.INTERNAL, str(e))
-
-    def CreateSnapshot(self, request, context):
-        """Create snapshot"""
-        source_volume_id = request.source_volume_id
-        name = request.name
-
-        if not source_volume_id or not name:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "SourceVolumeID and Name required")
-
-        logger.info(f"CreateSnapshot: {name} from {source_volume_id}")
-
-        try:
-            region, zone, storage, disk = parse_volume_id(source_volume_id)
-            client = self.clients.get(region)
-            if not client:
-                context.abort(grpc.StatusCode.NOT_FOUND, f"Region {region} not found")
-
-            snapshot_id = create_snapshot(client, source_volume_id, name)
-
-            snapshot = Snapshot(
-                snapshot_id=snapshot_id,
-                source_volume_id=source_volume_id,
-                creation_time=Timestamp(),
-                ready_to_use=True
-            )
-
-            logger.info(f"Snapshot created: {snapshot_id}")
-            return CreateSnapshotResponse(snapshot=snapshot)
-
-        except Exception as e:
-            logger.error(f"CreateSnapshot failed: {e}")
-            context.abort(grpc.StatusCode.INTERNAL, str(e))
-
-    def DeleteSnapshot(self, request, context):
-        """Delete snapshot"""
-        snapshot_id = request.snapshot_id
-        if not snapshot_id:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "SnapshotID required")
-
-        logger.info(f"DeleteSnapshot: {snapshot_id}")
-
-        try:
-            region, zone, storage, disk = parse_volume_id(snapshot_id)
-            client = self.clients.get(region)
-            if not client:
-                context.abort(grpc.StatusCode.NOT_FOUND, f"Region {region} not found")
-
-            delete_volume(client, snapshot_id)
-
-            logger.info(f"Snapshot deleted: {snapshot_id}")
-            return DeleteSnapshotResponse()
-
-        except Exception as e:
-            logger.error(f"DeleteSnapshot failed: {e}")
             context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     def ControllerGetCapabilities(self, request, context):
