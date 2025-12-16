@@ -54,6 +54,12 @@ class ControllerService(ControllerServicer):
 
         logger.info(f"Controller service initialized with {len(self.clients)} clusters")
 
+    def _get_default_region(self) -> str:
+        """Get default region (first configured region)"""
+        if not self.clients:
+            return ""
+        return next(iter(self.clients.keys()))
+
     def CreateVolume(self, request, context):
         """Create volume"""
         name = request.name
@@ -110,18 +116,18 @@ class ControllerService(ControllerServicer):
         logger.info(f"DeleteVolume: {volume_id}")
 
         try:
-            region, zone, storage, disk = parse_volume_id(volume_id)
+            region, zone, storage, disk = parse_volume_id(volume_id, self._get_default_region())
             client = self.clients.get(region)
             if not client:
                 context.abort(grpc.StatusCode.NOT_FOUND, f"Region {region} not found")
 
-            delete_volume(client, volume_id)
+            delete_volume(client, volume_id, self._get_default_region())
 
             logger.info(f"Volume deleted: {volume_id}")
             return DeleteVolumeResponse()
 
         except Exception as e:
-            logger.error(f"DeleteVolume failed: {e}")
+            logger.error(f"DeleteVolume failed: {e}", exc_info=True)
             context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     def ControllerPublishVolume(self, request, context):
@@ -135,7 +141,7 @@ class ControllerService(ControllerServicer):
         logger.info(f"ControllerPublishVolume: {volume_id} to {node_id}")
 
         try:
-            region, zone, storage, disk = parse_volume_id(volume_id)
+            region, zone, storage, disk = parse_volume_id(volume_id, self._get_default_region())
             client = self.clients.get(region)
             if not client:
                 context.abort(grpc.StatusCode.NOT_FOUND, f"Region {region} not found")
@@ -180,13 +186,13 @@ class ControllerService(ControllerServicer):
                     )
 
             # Attach volume
-            publish_context = attach_volume(client, vmid, volume_id)
+            publish_context = attach_volume(client, vmid, volume_id, self._get_default_region())
 
             logger.info(f"Volume {volume_id} attached to VM {vmid}")
             return ControllerPublishVolumeResponse(publish_context=publish_context)
 
         except Exception as e:
-            logger.error(f"ControllerPublishVolume failed: {e}")
+            logger.error(f"ControllerPublishVolume failed: {e}", exc_info=True)
             context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     def ControllerUnpublishVolume(self, request, context):
@@ -200,7 +206,7 @@ class ControllerService(ControllerServicer):
         logger.info(f"ControllerUnpublishVolume: {volume_id} from {node_id}")
 
         try:
-            region, zone, storage, disk = parse_volume_id(volume_id)
+            region, zone, storage, disk = parse_volume_id(volume_id, self._get_default_region())
             client = self.clients.get(region)
             if not client:
                 context.abort(grpc.StatusCode.NOT_FOUND, f"Region {region} not found")
@@ -230,13 +236,13 @@ class ControllerService(ControllerServicer):
                     logger.info(f"ControllerUnpublishVolume: discovered VM {vmid} on node {vm_node}")
 
             # Detach volume
-            detach_volume(client, vmid, volume_id)
+            detach_volume(client, vmid, volume_id, self._get_default_region())
 
             logger.info(f"Volume {volume_id} detached from VM {vmid}")
             return ControllerUnpublishVolumeResponse()
 
         except Exception as e:
-            logger.error(f"ControllerUnpublishVolume failed: {e}")
+            logger.error(f"ControllerUnpublishVolume failed: {e}", exc_info=True)
             context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     def ControllerExpandVolume(self, request, context):
@@ -254,7 +260,7 @@ class ControllerService(ControllerServicer):
         logger.info(f"ControllerExpandVolume: {volume_id} to {new_size} bytes")
 
         try:
-            region, zone, storage, disk = parse_volume_id(volume_id)
+            region, zone, storage, disk = parse_volume_id(volume_id, self._get_default_region())
             client = self.clients.get(region)
             if not client:
                 context.abort(grpc.StatusCode.NOT_FOUND, f"Region {region} not found")
@@ -269,7 +275,7 @@ class ControllerService(ControllerServicer):
                 )
 
             logger.info(f"ControllerExpandVolume: volume attached to VM {existing_vmid}")
-            expand_volume(client, existing_vmid, volume_id, new_size)
+            expand_volume(client, existing_vmid, volume_id, new_size, self._get_default_region())
 
             logger.info(f"Volume {volume_id} expanded to {new_size} bytes")
             return ControllerExpandVolumeResponse(
@@ -278,7 +284,7 @@ class ControllerService(ControllerServicer):
             )
 
         except Exception as e:
-            logger.error(f"ControllerExpandVolume failed: {e}")
+            logger.error(f"ControllerExpandVolume failed: {e}", exc_info=True)
             context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     def ControllerGetCapabilities(self, request, context):

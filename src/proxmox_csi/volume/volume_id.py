@@ -22,12 +22,17 @@ class VolumeID:
         return f"{self.region}{VOLUME_ID_SEPARATOR}{self.zone}{VOLUME_ID_SEPARATOR}{self.storage}{VOLUME_ID_SEPARATOR}{self.disk}"
 
     @classmethod
-    def from_string(cls, volume_id: str) -> 'VolumeID':
+    def from_string(cls, volume_id: str, default_region: str = "", default_zone: str = "") -> 'VolumeID':
         """
         Parse volume ID from string
 
+        Format: /storage/disk
+        Example: /kubedata/vm-9999-static-test
+
         Args:
-            volume_id: Volume ID string in format region/zone/storage/disk
+            volume_id: Volume ID string starting with /
+            default_region: Region to use (from driver config)
+            default_zone: Zone to use (can be empty, will be determined dynamically)
 
         Returns:
             VolumeID object
@@ -35,15 +40,19 @@ class VolumeID:
         Raises:
             ValueError: If volume ID format is invalid
         """
-        parts = volume_id.split(VOLUME_ID_SEPARATOR)
-        if len(parts) != VOLUME_ID_PARTS:
-            raise ValueError(f"Invalid volume ID format: {volume_id}, expected {VOLUME_ID_PARTS} parts")
+        if not volume_id.startswith('/'):
+            raise ValueError(f"Invalid volume ID format: {volume_id}, must start with /")
+
+        parts = volume_id[1:].split(VOLUME_ID_SEPARATOR)
+
+        if len(parts) != 2:
+            raise ValueError(f"Invalid volume ID format: {volume_id}, expected /storage/disk")
 
         return cls(
-            region=parts[0],
-            zone=parts[1],
-            storage=parts[2],
-            disk=parts[3]
+            region=default_region,
+            zone=default_zone,
+            storage=parts[0],
+            disk=parts[1]
         )
 
     @classmethod
@@ -69,17 +78,22 @@ class VolumeID:
         return (self.region, self.zone, self.storage, self.disk)
 
 
-def parse_volume_id(volume_id: str) -> Tuple[str, str, str, str]:
+def parse_volume_id(volume_id: str, default_region: str = "", default_zone: str = "") -> Tuple[str, str, str, str]:
     """
     Parse volume ID string into components
 
+    Format: /storage/disk
+    Example: /kubedata/vm-9999-static-test
+
     Args:
-        volume_id: Volume ID string
+        volume_id: Volume ID string starting with /
+        default_region: Default region if not in volume_id
+        default_zone: Default zone if not in volume_id
 
     Returns:
         Tuple of (region, zone, storage, disk)
     """
-    vid = VolumeID.from_string(volume_id)
+    vid = VolumeID.from_string(volume_id, default_region, default_zone)
     return vid.to_tuple()
 
 

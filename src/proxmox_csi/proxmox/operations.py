@@ -49,18 +49,19 @@ def create_volume(client: ProxmoxClient, region: str, zone: str,
     return volume_id
 
 
-def delete_volume(client: ProxmoxClient, volume_id: str) -> bool:
+def delete_volume(client: ProxmoxClient, volume_id: str, default_region: str = "") -> bool:
     """
     Delete volume
 
     Args:
         client: Proxmox API client
         volume_id: Volume ID
+        default_region: Default region for parsing volume_id
 
     Returns:
         True if successful
     """
-    region, zone, storage, disk = parse_volume_id(volume_id)
+    region, zone, storage, disk = parse_volume_id(volume_id, default_region)
 
     logger.info(f"Deleting volume {volume_id}")
 
@@ -75,7 +76,7 @@ def delete_volume(client: ProxmoxClient, volume_id: str) -> bool:
     return True
 
 
-def attach_volume(client: ProxmoxClient, vmid: int, volume_id: str) -> Dict[str, str]:
+def attach_volume(client: ProxmoxClient, vmid: int, volume_id: str, default_region: str = "") -> Dict[str, str]:
     """
     Attach volume to VM with WWN identifier
 
@@ -83,6 +84,7 @@ def attach_volume(client: ProxmoxClient, vmid: int, volume_id: str) -> Dict[str,
         client: Proxmox API client
         vmid: VM ID to attach to
         volume_id: Volume ID
+        default_region: Default region for parsing volume_id
 
     Returns:
         Publish context with DevicePath and lun
@@ -90,7 +92,7 @@ def attach_volume(client: ProxmoxClient, vmid: int, volume_id: str) -> Dict[str,
     Raises:
         Exception: If no free LUN or attachment fails
     """
-    region, zone, storage, disk = parse_volume_id(volume_id)
+    region, zone, storage, disk = parse_volume_id(volume_id, default_region)
 
     logger.info(f"Attaching volume {volume_id} to VM {vmid}")
 
@@ -137,7 +139,7 @@ def attach_volume(client: ProxmoxClient, vmid: int, volume_id: str) -> Dict[str,
     }
 
 
-def detach_volume(client: ProxmoxClient, vmid: int, volume_id: str) -> bool:
+def detach_volume(client: ProxmoxClient, vmid: int, volume_id: str, default_region: str = "") -> bool:
     """
     Detach volume from VM
 
@@ -145,11 +147,12 @@ def detach_volume(client: ProxmoxClient, vmid: int, volume_id: str) -> bool:
         client: Proxmox API client
         vmid: VM ID
         volume_id: Volume ID
+        default_region: Default region for parsing volume_id
 
     Returns:
         True if successful
     """
-    region, zone, storage, disk = parse_volume_id(volume_id)
+    region, zone, storage, disk = parse_volume_id(volume_id, default_region)
 
     logger.info(f"Detaching volume {volume_id} from VM {vmid}")
 
@@ -239,7 +242,7 @@ def check_existing_attachments(client: ProxmoxClient, region: str,
 
 
 def expand_volume(client: ProxmoxClient, vmid: int, volume_id: str,
-                 new_size_bytes: int) -> bool:
+                 new_size_bytes: int, default_region: str = "") -> bool:
     """
     Expand volume at storage level
 
@@ -248,6 +251,7 @@ def expand_volume(client: ProxmoxClient, vmid: int, volume_id: str,
         vmid: VM ID (volume must be attached)
         volume_id: Volume ID
         new_size_bytes: New size in bytes
+        default_region: Default region for parsing volume_id
 
     Returns:
         True if successful
@@ -255,7 +259,7 @@ def expand_volume(client: ProxmoxClient, vmid: int, volume_id: str,
     Raises:
         Exception: If volume not attached or resize fails
     """
-    region, zone, storage, disk = parse_volume_id(volume_id)
+    region, zone, storage, disk = parse_volume_id(volume_id, default_region)
 
     logger.info(f"Expanding volume {volume_id} to {new_size_bytes} bytes")
 
