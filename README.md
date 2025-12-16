@@ -510,8 +510,3 @@ Apache 2.0
 ## Contributing
 
 Contributions are welcome! Please open an issue or pull request.
-
-## Credits
-
-This Python implementation is based on the original Go implementation at:
-https://github.com/adi/proxmox-shared-lvm-csi-plugin
