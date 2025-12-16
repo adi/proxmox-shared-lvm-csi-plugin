@@ -6,7 +6,9 @@ Constants for Proxmox CSI Driver
 DRIVER_NAME = "csi.proxmox.sqreept.com"
 DRIVER_VERSION = "0.1.0"
 
-# Proxmox VM ID for volume storage
+# Proxmox VM ID used as metadata tag for CSI volumes
+# This is just a tag - VM 9999 does not need to exist
+# Helps identify CSI-managed volumes in Proxmox UI
 STORAGE_VMID = 9999
 
 # SCSI LUN limits (QEMU has max 30 SCSI devices, avoid LUN 0)

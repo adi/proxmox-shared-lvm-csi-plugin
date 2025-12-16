@@ -216,7 +216,7 @@ def check_existing_attachments(client: ProxmoxClient, region: str,
             for vm in vms:
                 vmid = vm['vmid']
 
-                # Skip storage VM
+                # Skip STORAGE_VMID (volumes at rest, not attached to workers)
                 if vmid == STORAGE_VMID:
                     continue
 

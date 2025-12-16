@@ -207,6 +207,151 @@ spec:
         claimName: block-pvc
 ```
 
+## Static Volume Provisioning
+
+While the CSI driver supports dynamic provisioning (automatic volume creation), you can also use pre-created volumes with static provisioning.
+
+### Why Static Provisioning?
+
+Use static provisioning when you need to:
+- Pre-create volumes with specific LVM properties
+- Import existing LVM volumes into Kubernetes
+- Have more control over volume creation and placement
+
+### Creating Static Volumes
+
+**Important:** Static volumes must be created using the Proxmox API (not raw `lvcreate`) to ensure they appear in Proxmox UI and are properly registered.
+
+#### Step 1: Create Volume via Proxmox API
+
+From within a controller pod or any environment with access to the Proxmox API:
+
+```bash
+# Get a shell in the controller pod
+kubectl exec -it -n kube-system deployment/proxmox-csi-controller -c proxmox-csi-controller -- bash
+
+# Create the volume using Python
+python3 << 'EOF'
+from proxmox_csi.proxmox.client import ProxmoxClient
+import yaml
+
+# Load config
+with open('/etc/proxmox/config.yaml') as f:
+    cfg = yaml.safe_load(f)
+c = cfg['clusters'][0]
+
+# Initialize client
+client = ProxmoxClient(c['url'], c['token_id'], c['token_secret'], c.get('insecure', False))
+
+# Create volume
+# IMPORTANT: filename must start with "vm-9999-" prefix
+result = client.create_vm_disk(
+    vmid=9999,              # Metadata tag (VM 9999 doesn't need to exist)
+    node='pve20',           # Your Proxmox node name
+    storage='kubedata',     # Your LVM storage name
+    filename='vm-9999-myapp-data',  # Must start with vm-9999-
+    size_bytes=10 * 1024**3  # 10GB
+)
+print(f"Volume created: {result}")
+EOF
+```
+
+**Key Points:**
+- The `vmid=9999` is just a metadata tag - VM 9999 does not need to exist
+- The `filename` parameter **must** start with `vm-9999-` prefix (Proxmox API requirement)
+- The volume will be visible in Proxmox UI under the storage content
+- Choose any available Proxmox node for the `node` parameter
+
+#### Step 2: Format the Volume
+
+SSH to a Proxmox node and format the volume:
+
+```bash
+# For ext4
+mkfs.ext4 /dev/<volume-group>/<volume-name>
+
+# For XFS
+mkfs.xfs /dev/<volume-group>/<volume-name>
+
+# Example:
+mkfs.xfs /dev/kubedata/vm-9999-myapp-data
+```
+
+#### Step 3: Create PersistentVolume in Kubernetes
+
+Create a PV that references the pre-created volume:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: myapp-data-pv
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: proxmox-lvm-xfs  # Match your StorageClass
+  csi:
+    driver: csi.proxmox.sqreept.com
+    volumeHandle: /kubedata/vm-9999-myapp-data  # Simplified format: /storage/disk-name
+    fsType: xfs
+```
+
+**Volume Handle Format:** Use the simplified format `/storage/disk-name`:
+- Example: `/kubedata/vm-9999-myapp-data`
+- The region and zone are automatically inferred from the driver configuration
+
+#### Step 4: Create PersistentVolumeClaim
+
+Create a PVC that binds to the PV:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: myapp-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: proxmox-lvm-xfs
+  resources:
+    requests:
+      storage: 10Gi
+  volumeName: myapp-data-pv  # Bind to specific PV
+```
+
+#### Step 5: Use in Pod
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp
+spec:
+  containers:
+    - name: app
+      image: nginx
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: myapp-data
+```
+
+### Static vs Dynamic Provisioning
+
+| Feature | Static Provisioning | Dynamic Provisioning |
+|---------|-------------------|---------------------|
+| Volume Creation | Manual via Proxmox API | Automatic by CSI driver |
+| Control | Full control over LVM properties | Standard properties |
+| Naming | Custom (with vm-9999- prefix) | Auto-generated |
+| Use Case | Pre-existing volumes, specific requirements | Standard PVC workflow |
+| Proxmox UI | Visible (when created via API) | Visible |
+
 ## Configuration
 
 ### StorageClass Parameters
