@@ -2,6 +2,8 @@
 WWN-based device discovery via sysfs scanning
 """
 import os
+import stat
+import subprocess
 import time
 import logging
 from typing import Optional
@@ -96,6 +98,96 @@ def scan_scsi_devices_for_wwn(target_wwn: str) -> Optional[str]:
         logger.error(f"Error scanning SCSI devices: {e}")
 
     return None
+
+
+def get_block_device_from_special(path: str) -> Optional[str]:
+    """
+    Resolve a block special file (e.g. a bind-mounted raw block volume)
+    to its /dev/<name> device path
+
+    Args:
+        path: Path to a block special file
+
+    Returns:
+        Device path if path is a block device, None otherwise
+    """
+    try:
+        st = os.stat(path)
+        if not stat.S_ISBLK(st.st_mode):
+            return None
+        major, minor = os.major(st.st_rdev), os.minor(st.st_rdev)
+        sys_path = os.path.realpath(f'/sys/dev/block/{major}:{minor}')
+        return f'/dev/{os.path.basename(sys_path)}'
+    except OSError:
+        return None
+
+
+def is_device_in_use(device_path: str) -> bool:
+    """
+    Check whether a block device still backs any mount or bind mount
+
+    Args:
+        device_path: Device path (e.g., /dev/sdb)
+
+    Returns:
+        True if the device is mounted or its /dev entry is bind-mounted
+    """
+    try:
+        st = os.stat(device_path)
+        if not stat.S_ISBLK(st.st_mode):
+            return False
+        majmin = f'{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}'
+    except OSError:
+        return False
+
+    device_name = os.path.basename(os.path.realpath(device_path))
+
+    try:
+        with open('/proc/self/mountinfo', 'r') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                # parts[2] is the mount's device major:minor (filesystem
+                # mounts), parts[3] is the root within the source filesystem
+                # (the device name for a bind-mounted /dev entry)
+                if parts[2] == majmin or parts[3] == f'/{device_name}':
+                    return True
+    except OSError:
+        pass
+
+    return False
+
+
+def remove_scsi_device(device_path: str) -> None:
+    """
+    Flush and delete a SCSI block device from the kernel
+
+    Must run after the last unmount and before ControllerUnpublishVolume
+    detaches the disk from the VM: flushing prevents dirty buffers from
+    being lost when the LUN disappears, and deleting the device prevents
+    a stale /dev entry (with the old WWN still in sysfs) from confusing
+    later discovery.
+
+    Args:
+        device_path: Device path (e.g., /dev/sdb)
+    """
+    device_name = os.path.basename(os.path.realpath(device_path))
+
+    # Flush page cache and dirty buffers (best effort)
+    try:
+        subprocess.run(['blockdev', '--flushbufs', device_path],
+                      capture_output=True, check=False, timeout=30)
+    except Exception as e:
+        logger.debug(f"blockdev --flushbufs failed (ignored): {e}")
+
+    delete_path = f'/sys/block/{device_name}/device/delete'
+    try:
+        with open(delete_path, 'w') as f:
+            f.write('1')
+        logger.info(f"SCSI device {device_name} removed")
+    except OSError as e:
+        logger.warning(f"Could not remove SCSI device {device_name}: {e}")
 
 
 def get_device_from_mount(mount_path: str) -> Optional[str]:

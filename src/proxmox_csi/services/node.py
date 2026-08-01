@@ -17,7 +17,13 @@ from ..csi_pb2 import (
     VolumeCapability
 )
 from ..csi_pb2_grpc import NodeServicer
-from ..device.discovery import discover_device_by_wwn, get_device_from_mount
+from ..device.discovery import (
+    discover_device_by_wwn,
+    get_device_from_mount,
+    get_block_device_from_special,
+    is_device_in_use,
+    remove_scsi_device
+)
 from ..filesystem.format import format_device, check_filesystem
 from ..filesystem.mount import mount_device, unmount_path, bind_mount, is_mounted
 from ..filesystem.resize import resize_filesystem, get_filesystem_type
@@ -114,10 +120,20 @@ class NodeService(NodeServicer):
                 logger.info("Raw block device, skipping unstaging")
                 return NodeUnstageVolumeResponse()
 
+            # Resolve the backing device before unmounting - the mapping
+            # disappears from /proc/mounts afterwards
+            device_path = get_device_from_mount(staging_path)
+
             # Unmount
             if is_mounted(staging_path):
                 unmount_path(staging_path)
                 logger.info(f"Path {staging_path} unmounted")
+
+            # Flush and remove the SCSI device before returning success, so
+            # the controller-side detach that follows cannot race in-flight
+            # I/O or leave a stale /dev entry with the old WWN behind
+            if device_path and not is_device_in_use(device_path):
+                remove_scsi_device(device_path)
 
             logger.info(f"NodeUnstageVolume completed for {volume_id}")
             return NodeUnstageVolumeResponse()
@@ -180,9 +196,18 @@ class NodeService(NodeServicer):
         logger.info(f"NodeUnpublishVolume: {volume_id} from {target_path}")
 
         try:
+            # For raw block volumes the target is a bind-mounted device file
+            # and there is no staging, so unpublish is the last node-side
+            # step - resolve the device now to tear it down after unmounting
+            device_path = get_block_device_from_special(target_path)
+
             if is_mounted(target_path):
                 unmount_path(target_path)
                 logger.info(f"Path {target_path} unmounted")
+
+            # Only remove the device once no other pod bind-mounts it
+            if device_path and not is_device_in_use(device_path):
+                remove_scsi_device(device_path)
 
             logger.info(f"NodeUnpublishVolume completed for {volume_id}")
             return NodeUnpublishVolumeResponse()
