@@ -171,6 +171,10 @@ def remove_scsi_device(device_path: str) -> None:
 
     Args:
         device_path: Device path (e.g., /dev/sdb)
+
+    Raises:
+        Exception: If the device cannot be removed - the caller must fail
+        the RPC so kubelet retries before the controller detaches the disk
     """
     device_name = os.path.basename(os.path.realpath(device_path))
 
@@ -179,15 +183,16 @@ def remove_scsi_device(device_path: str) -> None:
         subprocess.run(['blockdev', '--flushbufs', device_path],
                       capture_output=True, check=False, timeout=30)
     except Exception as e:
-        logger.debug(f"blockdev --flushbufs failed (ignored): {e}")
+        logger.warning(f"blockdev --flushbufs failed (ignored): {e}")
 
     delete_path = f'/sys/block/{device_name}/device/delete'
     try:
         with open(delete_path, 'w') as f:
             f.write('1')
-        logger.info(f"SCSI device {device_name} removed")
     except OSError as e:
-        logger.warning(f"Could not remove SCSI device {device_name}: {e}")
+        raise Exception(f"Failed to remove SCSI device {device_name}: {e}")
+
+    logger.info(f"SCSI device {device_name} removed")
 
 
 def get_device_from_mount(mount_path: str) -> Optional[str]:
