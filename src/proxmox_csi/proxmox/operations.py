@@ -351,7 +351,8 @@ def expand_volume(client: ProxmoxClient, vmid: int, volume_id: str,
         raise Exception(f"Volume {volume_id} not attached to VM {vmid}, cannot resize")
 
     device = f"{DEVICE_PREFIX}{lun}"
-    size_mb = new_size_bytes // (1024 * 1024)
+    # Round up so the disk is never smaller than the size reported to CSI
+    size_mb = (new_size_bytes + (1024 * 1024) - 1) // (1024 * 1024)
 
     logger.info(f"Resizing device {device} to {size_mb}M on node {vm_node}")
 

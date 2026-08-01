@@ -28,7 +28,11 @@ class ProxmoxClient:
             token_secret: API token secret
             insecure: Skip TLS certificate verification
         """
-        self.base_url = url.rstrip('/api2/json').rstrip('/')
+        # str.rstrip strips characters, not a suffix - it would eat trailing
+        # hostname characters like the 'n' in "https://pve.lan"
+        self.base_url = url.rstrip('/')
+        if self.base_url.endswith('/api2/json'):
+            self.base_url = self.base_url[:-len('/api2/json')]
         self.api_url = f"{self.base_url}/api2/json"
         self.token_id = token_id
         self.token_secret = token_secret
@@ -160,16 +164,18 @@ class ProxmoxClient:
         Returns:
             Response data
         """
-        size_gb = size_bytes / (1024**3)
+        # Round up to whole GiB - truncating would allocate less than
+        # requested (a 512M volume would be created as 0G)
+        size_gb = (size_bytes + (1024**3) - 1) // (1024**3)
 
         data = {
             'vmid': vmid,
             'filename': filename,
-            'size': f'{int(size_gb)}G'
+            'size': f'{size_gb}G'
         }
 
         logger.info(f"create_vm_disk: vmid={vmid}, node={node}, storage={storage}, "
-                   f"filename={filename}, size_bytes={size_bytes}, size_gb={size_gb:.2f}")
+                   f"filename={filename}, size_bytes={size_bytes}, size_gb={size_gb}")
         logger.debug(f"create_vm_disk: POST /nodes/{node}/storage/{storage}/content with data={data}")
 
         return self._request('POST', f'/nodes/{node}/storage/{storage}/content',
