@@ -126,7 +126,11 @@ def bind_mount(source_path: str, target_path: str, readonly: bool = False) -> bo
 
 def is_mounted(path: str) -> bool:
     """
-    Check if path is mounted
+    Check if path is a mount point
+
+    Compares against the mount point column of /proc/mounts exactly - a
+    substring match would also hit the device column and prefix paths,
+    which can silently skip a mount or unmount.
 
     Args:
         path: Path to check
@@ -134,12 +138,15 @@ def is_mounted(path: str) -> bool:
     Returns:
         True if mounted
     """
+    if len(path) > 1:
+        path = path.rstrip('/')
     try:
         with open('/proc/mounts', 'r') as f:
             for line in f:
-                if path in line:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == path:
                     return True
-    except:
+    except OSError:
         pass
 
     return False
