@@ -29,8 +29,10 @@ DEFAULT_FS_TYPE = FS_TYPE_EXT4
 
 # Device discovery
 SCSI_DEVICES_PATH = "/sys/bus/scsi/devices"
+SCSI_HOST_PATH = "/sys/class/scsi_host"
 DEVICE_DISCOVERY_TIMEOUT = 30  # seconds - hotplug can take a while on a busy host
 DEVICE_DISCOVERY_INTERVAL = 0.05  # 50ms
+DEVICE_RESCAN_INTERVAL = 2  # seconds - force a SCSI rescan while polling
 
 # Proxmox API HTTP timeouts (seconds) - without these a hung Proxmox API
 # pins a sidecar worker until its 300s gRPC deadline fires

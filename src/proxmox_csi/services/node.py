@@ -74,8 +74,12 @@ class NodeService(NodeServicer):
             if not wwn:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Invalid DevicePath format")
 
-            # Discover device
-            device_path = discover_device_by_wwn(wwn)
+            # Discover device (LUN enables stale-slot cleanup and rescan)
+            try:
+                lun = int(publish_context.get('lun', ''))
+            except (TypeError, ValueError):
+                lun = None
+            device_path = discover_device_by_wwn(wwn, lun)
             logger.info(f"Device discovered: {device_path}")
 
             # Get filesystem type
@@ -164,7 +168,11 @@ class NodeService(NodeServicer):
                 publish_context = request.publish_context
                 device_path_wwn = publish_context.get('DevicePath', '')
                 wwn = device_path_wwn.split('wwn-0x')[1] if 'wwn-0x' in device_path_wwn else ''
-                device_path = discover_device_by_wwn(wwn)
+                try:
+                    lun = int(publish_context.get('lun', ''))
+                except (TypeError, ValueError):
+                    lun = None
+                device_path = discover_device_by_wwn(wwn, lun)
 
                 logger.info(f"Binding raw block device {device_path} to {target_path}")
                 bind_mount(device_path, target_path, readonly)

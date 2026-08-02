@@ -7,22 +7,38 @@ import subprocess
 import time
 import logging
 from typing import Optional
-from ..constants import SCSI_DEVICES_PATH, DEVICE_DISCOVERY_TIMEOUT, DEVICE_DISCOVERY_INTERVAL
+from ..constants import (
+    SCSI_DEVICES_PATH,
+    SCSI_HOST_PATH,
+    DEVICE_DISCOVERY_TIMEOUT,
+    DEVICE_DISCOVERY_INTERVAL,
+    DEVICE_RESCAN_INTERVAL
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-def discover_device_by_wwn(wwn: str, timeout: int = DEVICE_DISCOVERY_TIMEOUT) -> str:
+def discover_device_by_wwn(wwn: str, lun: Optional[int] = None,
+                          timeout: int = DEVICE_DISCOVERY_TIMEOUT) -> str:
     """
     Discover block device by WWN identifier
 
     Scans /sys/bus/scsi/devices for matching WWN.
     Retries for specified timeout with short intervals.
 
+    The kernel does not act on QEMU hotplug by itself when the target's LUN
+    inventory has changed ("LUN assignments on this target have changed. The
+    Linux SCSI layer does not automatically remap LUN assignments") - so while
+    polling we periodically clear any stale device squatting on our LUN and
+    force a SCSI host rescan; passive polling alone would wait for a device
+    the kernel is never going to create.
+
     Args:
         wwn: WWN hex string (without 0x prefix)
-        timeout: Timeout in seconds (default: 10)
+        lun: Expected LUN from the publish context - enables stale-device
+             cleanup at that slot (optional)
+        timeout: Timeout in seconds
 
     Returns:
         Device path (e.g., /dev/sda)
@@ -30,9 +46,11 @@ def discover_device_by_wwn(wwn: str, timeout: int = DEVICE_DISCOVERY_TIMEOUT) ->
     Raises:
         Exception: If device not found after timeout
     """
-    logger.info(f"Discovering device with WWN {wwn}")
+    logger.info(f"Discovering device with WWN {wwn}" +
+                (f" at LUN {lun}" if lun is not None else ""))
 
     max_retries = int(timeout / DEVICE_DISCOVERY_INTERVAL)
+    rescan_every = max(1, int(DEVICE_RESCAN_INTERVAL / DEVICE_DISCOVERY_INTERVAL))
 
     for attempt in range(max_retries):
         device_path = scan_scsi_devices_for_wwn(wwn)
@@ -40,9 +58,97 @@ def discover_device_by_wwn(wwn: str, timeout: int = DEVICE_DISCOVERY_TIMEOUT) ->
             logger.info(f"Device found: {device_path} for WWN {wwn}")
             return device_path
 
+        if attempt > 0 and attempt % rescan_every == 0:
+            if lun is not None:
+                remove_stale_device_at_lun(lun, wwn)
+            rescan_scsi_hosts()
+
         time.sleep(DEVICE_DISCOVERY_INTERVAL)
 
     raise Exception(f"Device with WWN {wwn} not found after {timeout}s")
+
+
+def rescan_scsi_hosts() -> None:
+    """
+    Ask every SCSI host to rescan its targets
+
+    Makes the kernel probe for LUNs it missed - hotplug events can be lost
+    and changed LUN assignments are never remapped automatically.
+    """
+    if not os.path.exists(SCSI_HOST_PATH):
+        return
+
+    for host in os.listdir(SCSI_HOST_PATH):
+        scan_path = os.path.join(SCSI_HOST_PATH, host, 'scan')
+        try:
+            with open(scan_path, 'w') as f:
+                f.write('- - -')
+            logger.debug(f"Rescanned SCSI host {host}")
+        except OSError as e:
+            logger.debug(f"Rescan of {host} failed (ignored): {e}")
+
+
+def remove_stale_device_at_lun(lun: int, expected_wwn: str) -> None:
+    """
+    Remove a stale QEMU SCSI device occupying a LUN
+
+    After the target's LUN inventory changes, the kernel keeps whatever
+    device it had at that address and never remaps it - a leftover device
+    at our LUN with the wrong WWN blocks the rescan from creating the new
+    disk, so it must be deleted first.
+
+    Args:
+        lun: LUN the new disk is expected at
+        expected_wwn: WWN hex string of the disk we are waiting for
+    """
+    if not os.path.exists(SCSI_DEVICES_PATH):
+        return
+
+    for device_dir in os.listdir(SCSI_DEVICES_PATH):
+        parts = device_dir.split(':')
+        if len(parts) != 4:
+            continue
+        try:
+            if int(parts[3]) != lun:
+                continue
+        except ValueError:
+            continue
+
+        device_path = os.path.join(SCSI_DEVICES_PATH, device_dir)
+
+        vendor = _read_sysfs_file(os.path.join(device_path, 'vendor'))
+        if not vendor or vendor.upper() != 'QEMU':
+            continue
+
+        wwid = _read_sysfs_file(os.path.join(device_path, 'wwid')) or ''
+        if wwid == f'naa.{expected_wwn}':
+            continue  # this is the disk we are waiting for, not a stale one
+
+        # Never yank a device that still backs a mount - its own unstage
+        # is responsible for tearing it down
+        block_dir = os.path.join(device_path, 'block')
+        block_devices = os.listdir(block_dir) if os.path.exists(block_dir) else []
+        if any(is_device_in_use(f'/dev/{b}') for b in block_devices):
+            logger.error(f"Stale SCSI device {device_dir} (wwid={wwid}) occupies "
+                        f"LUN {lun} but is still in use, not removing")
+            continue
+
+        logger.warning(f"Removing stale SCSI device {device_dir} (wwid={wwid}) "
+                      f"occupying LUN {lun}")
+        try:
+            with open(os.path.join(device_path, 'delete'), 'w') as f:
+                f.write('1')
+        except OSError as e:
+            logger.warning(f"Failed to remove stale SCSI device {device_dir}: {e}")
+
+
+def _read_sysfs_file(path: str) -> Optional[str]:
+    """Read and strip a sysfs attribute, None if unreadable"""
+    try:
+        with open(path, 'r') as f:
+            return f.read().strip()
+    except OSError:
+        return None
 
 
 def scan_scsi_devices_for_wwn(target_wwn: str) -> Optional[str]:
