@@ -10,6 +10,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib3 import disable_warnings
 from urllib3.exceptions import InsecureRequestWarning
+from ..constants import PROXMOX_CONNECT_TIMEOUT, PROXMOX_READ_TIMEOUT
 
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,8 @@ class ProxmoxClient:
             url,
             json=data,
             params=params,
-            verify=self.verify
+            verify=self.verify,
+            timeout=(PROXMOX_CONNECT_TIMEOUT, PROXMOX_READ_TIMEOUT)
         )
 
         logger.debug(f"Proxmox API Response: status={response.status_code}")

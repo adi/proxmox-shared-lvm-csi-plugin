@@ -29,8 +29,13 @@ DEFAULT_FS_TYPE = FS_TYPE_EXT4
 
 # Device discovery
 SCSI_DEVICES_PATH = "/sys/bus/scsi/devices"
-DEVICE_DISCOVERY_TIMEOUT = 10  # seconds
+DEVICE_DISCOVERY_TIMEOUT = 30  # seconds - hotplug can take a while on a busy host
 DEVICE_DISCOVERY_INTERVAL = 0.05  # 50ms
+
+# Proxmox API HTTP timeouts (seconds) - without these a hung Proxmox API
+# pins a sidecar worker until its 300s gRPC deadline fires
+PROXMOX_CONNECT_TIMEOUT = 5
+PROXMOX_READ_TIMEOUT = 30
 
 # Volume capabilities
 MAX_VOLUMES_PER_NODE = 29  # Matches LUN range 1-29 (QEMU 30 SCSI limit, LUN 0 avoided)
